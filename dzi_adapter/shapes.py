@@ -10,8 +10,12 @@ from math import ceil, log2
 from typing import List, Tuple, Union
 
 import cv2
+import geopandas as gpd
 import numpy as np
+import pandas as pd
 import tiledb
+from shapely.geometry import MultiPolygon, Polygon, box
+from sklearn.cluster import DBSCAN
 
 logger = logging.getLogger(__name__)
 MASK_FALSE = 0
@@ -166,7 +170,35 @@ class OpenCVShapeConverter(ShapeConverter):
         )
         points = [p + (p[0],) for p in points]
         shapes = [Shape(point).rescale(factor) for point in points]
-        return shapes
+
+        EPS_DISTANCE = dataset.slide_resolution[0] // 50
+        MIN_SAMPLE_POLYGONS = 1
+
+        df = gpd.GeoDataFrame(geometry=[Polygon(s.points) for s in shapes])
+
+        # preparation for dbscan
+        df["x"] = df["geometry"].centroid.x
+        df["y"] = df["geometry"].centroid.y
+        #  coords = df.as_matrix(columns=['x', 'y'])
+        coords = df[["x", "y"]].to_numpy()
+
+        # dbscan
+        dbscan = DBSCAN(eps=EPS_DISTANCE, min_samples=MIN_SAMPLE_POLYGONS)
+        clusters = dbscan.fit(coords)
+
+        # add labels back to dataframe
+        labels = pd.Series(clusters.labels_).rename("IslandID")
+        df = pd.concat([df, labels], axis=1)
+        logger.info(df)
+
+        clusters = []
+        for cluster in df.groupby("IslandID"):
+            #  print(i, cluster[1]["geometry"].bounds)
+            clusters.append(MultiPolygon(list(cluster[1]["geometry"])))
+
+        cluster_shapes = [Shape(box(*c.bounds).exterior.coords) for c in clusters]
+
+        return cluster_shapes
 
 
 def get_shape_converter(cls: str):
